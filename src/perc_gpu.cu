@@ -325,10 +325,11 @@ void GpuRunner::run() {
         CHECK_CUDA_ERROR(cudaStreamSynchronize(m_impl->compute_stream));
         nchange = *(m_impl->h_changes);
 
-        if (step % printfreq == 0) {
-            printf("percolate: number of changes on step %d is %d\n",
-                   step, nchange);
-        }
+// i was using these prints to see how the algorithm behaves in the gpu in intermediate steps   
+        //if (step % printfreq == 0) {
+        //    printf("percolate: number of changes on step %d is %d\n",
+        //           step, nchange);
+        //}
 
         std::swap(d_next, d_current);
         step++;
