@@ -118,11 +118,11 @@ void CpuRunner::run() {
   while (nchange && step <= maxstep) {
     nchange = percolate_cpu_step(M, N, current, next);
 
-    //  Report progress every now and then
-    if (step % printfreq == 0) {
-      std::printf("percolate: number of changes on step %d is %d\n",
-		  step, nchange);
-    }
+    //  i was using this prints to see how the algorithm behaves in the cpu in intermediate steps
+    //if (step % printfreq == 0) {
+    //  std::printf("percolate: number of changes on step %d is %d\n",
+		//  step, nchange);
+    //}
 
     // Swap the pointers for the next iteration
     std::swap(next, current);
