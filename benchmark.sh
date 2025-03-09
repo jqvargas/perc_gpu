@@ -2,9 +2,9 @@
 
 # Configuración básica para Cirrus
 #SBATCH --partition=gpu
-#SBATCH --qos=short
+#SBATCH --qos=gpu
 #SBATCH --gres=gpu:1
-#SBATCH --time=01:00:00
+#SBATCH --time=00:10:00
 #SBATCH --account=mdisspt-s2266011
 
 module load gcc/10.2.0 nvidia/nvhpc/24.5
