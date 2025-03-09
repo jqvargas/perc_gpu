@@ -17,13 +17,15 @@
 #include <vector>
 #include <cuda_runtime.h>
 
-// Increased block size for better V100 GPU occupancy
-// V100 has 80 SMs, each supporting up to 2048 threads
-// 32x32 = 1024 threads per block is a good choice for V100
-constexpr int BLOCK_SIZE = 32;  // Thread block size (32x32)
+// ¡Optimización para la GPU V100! 
+// Tío, la V100 es una bestia con 80 SMs y puede manejar hasta 2048 threads por SM
+// Usamos bloques de 32x32 = 1024 threads que es lo más guay para esta GPU
+// [GPU ADAPTATION] - Increased from CPU's serial processing to 32x32 thread blocks
+constexpr int BLOCK_SIZE = 32;  // Tamaño del bloque (32x32 threads, ¡a tope!)
 constexpr int printfreq = 100;
 
-// CUDA error checking macro
+// Macro para checkear errores de CUDA
+// Porsi las moscas, mejor prevenir que curar ;)
 #define CHECK_CUDA_ERROR(val) check_cuda( (val), #val, __FILE__, __LINE__ )
 template<typename T>
 void check_cuda(T result, char const *const func, const char *const file, int const line) {
@@ -34,42 +36,49 @@ void check_cuda(T result, char const *const func, const char *const file, int co
     }
 }
 
-// CUDA kernel for percolation step
+// ¡El kernel más chulo de CUDA para la percolación!
+// [GPU ADAPTATION] - Converted from CPU's sequential loop to parallel CUDA kernel
 __global__ void percolate_kernel(int M, int N, const int* __restrict__ state, 
                                 int* __restrict__ next, int* changes) {
-    // Calculate indices with adjusted block size
+    // Calculamos los índices con el nuevo tamaño de bloque
+    // ¡Trucazo! Usamos registros para acceso más rápido
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
-    const int j = blockIdx.x * blockDim.x + tx + 1;  // column (coalesced access)
-    const int i = blockIdx.y * blockDim.y + ty + 1;  // row
+    // [GPU ADAPTATION] - Changed row-major to column-major for coalesced access
+    const int j = blockIdx.x * blockDim.x + tx + 1;  // columna (acceso coalescido, ¡qué pro!)
+    const int i = blockIdx.y * blockDim.y + ty + 1;  // fila
     
     if (i <= M && j <= N) {
-        // Pre-calculate array index and cache in register
+        // Pre-calculamos el índice y lo guardamos en registro
+        // ¡Optimización a tope! 🚀
         const int idx = i * (N + 2) + j;
         
-        // Cache neighbors in registers for faster access
+        // Cachear el valor actual en registro
         const int oldval = state[idx];
         
         if (oldval != 0) {
-            // Cache neighbor values in registers
-            const int up = state[idx - (N + 2)];
-            const int down = state[idx + (N + 2)];
-            const int left = state[idx - 1];
-            const int right = state[idx + 1];
+            // Guardamos los vecinos en registros
+            // [GPU ADAPTATION] - Cache neighbor values in registers for faster access
+            const int up = state[idx - (N + 2)];     // Vecino de arriba
+            const int down = state[idx + (N + 2)];   // Vecino de abajo
+            const int left = state[idx - 1];         // Vecino de la izquierda
+            const int right = state[idx + 1];        // Vecino de la derecha
             
-            // Use registers for intermediate max calculations
+            // Usamos registros para los cálculos intermedios
+            // ¡Más rápido que un Fórmula 1! 🏎️
             int newval = oldval;
             newval = max(newval, up);
             newval = max(newval, down);
             newval = max(newval, left);
             newval = max(newval, right);
 
-            // Write result (coalesced write)
+            // Escribimos el resultado (escritura coalescida)
             next[idx] = newval;
             
-            // Only do atomic operation if there's a change
+            // Solo hacemos la operación atómica si hay cambio
+            // [GPU ADAPTATION] - Added atomic operation for parallel counting
             if (newval != oldval) {
-                atomicAdd(changes, 1);
+                atomicAdd(changes, 1);  // ¡Cuenta atómica, que no se nos escape ninguno!
             }
         } else {
             next[idx] = 0;
@@ -77,17 +86,20 @@ __global__ void percolate_kernel(int M, int N, const int* __restrict__ state,
     }
 }
 
+// Estructura para manejar todo el cotarro de la GPU
 struct GpuRunner::Impl {
+    // Dimensiones de la matriz
     int M;
     int N;
-    int* state;      // Host memory (pinned)
-    int* tmp;        // Host memory (pinned)
-    int* d_state;    // Device memory
-    int* d_tmp;      // Device memory
-    int* d_changes;  // Device memory for counting changes
-    int* h_changes;  // Host memory for changes (pinned)
+    // [GPU ADAPTATION] - Changed from regular to pinned memory for faster transfers
+    int* state;      // Memoria del host (pinned, ¡más rápida que un rayo!)
+    int* tmp;        // Memoria del host (pinned)
+    int* d_state;    // Memoria de la GPU
+    int* d_tmp;      // Memoria de la GPU
+    int* d_changes;  // Contador de cambios en la GPU
+    int* h_changes;  // Contador de cambios en el host (pinned)
 
-    // Timing events
+    // Eventos para medir tiempos (¡a cronometrar todo!)
     cudaEvent_t start_compute;
     cudaEvent_t stop_compute;
     cudaEvent_t start_h2d;
@@ -95,12 +107,13 @@ struct GpuRunner::Impl {
     cudaEvent_t start_d2h;
     cudaEvent_t stop_d2h;
 
-    // Timing results (in milliseconds)
+    // Resultados de tiempos (en milisegundos)
     float compute_time;
     float h2d_time;
     float d2h_time;
 
-    // CUDA streams
+    // Streams de CUDA (¡para hacer varias cosas a la vez!)
+    // [GPU ADAPTATION] - Added streams for concurrent operations
     cudaStream_t compute_stream;
     cudaStream_t transfer_stream;
 
