@@ -38,22 +38,36 @@ void check_cuda(T result, char const *const func, const char *const file, int co
 __global__ void percolate_kernel(int M, int N, const int* __restrict__ state, 
                                 int* __restrict__ next, int* changes) {
     // Calculate indices with adjusted block size
-    int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
-    int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int j = blockIdx.x * blockDim.x + tx + 1;  // column (coalesced access)
+    const int i = blockIdx.y * blockDim.y + ty + 1;  // row
     
     if (i <= M && j <= N) {
-        int idx = i * (N + 2) + j;
-        int oldval = state[idx];
-        int newval = oldval;
-
+        // Pre-calculate array index and cache in register
+        const int idx = i * (N + 2) + j;
+        
+        // Cache neighbors in registers for faster access
+        const int oldval = state[idx];
+        
         if (oldval != 0) {
-            // Check neighbors and update maximum
-            newval = max(newval, state[idx - (N + 2)]);  // Up
-            newval = max(newval, state[idx + (N + 2)]);  // Down
-            newval = max(newval, state[idx - 1]);        // Left
-            newval = max(newval, state[idx + 1]);        // Right
+            // Cache neighbor values in registers
+            const int up = state[idx - (N + 2)];
+            const int down = state[idx + (N + 2)];
+            const int left = state[idx - 1];
+            const int right = state[idx + 1];
+            
+            // Use registers for intermediate max calculations
+            int newval = oldval;
+            newval = max(newval, up);
+            newval = max(newval, down);
+            newval = max(newval, left);
+            newval = max(newval, right);
 
+            // Write result (coalesced write)
             next[idx] = newval;
+            
+            // Only do atomic operation if there's a change
             if (newval != oldval) {
                 atomicAdd(changes, 1);
             }
