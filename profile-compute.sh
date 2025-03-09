@@ -3,7 +3,7 @@
 #SBATCH --qos=short
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:05:00
-
+#SBATCH --account=mdisspt-s2266011
 module load gcc/10.2.0 nvidia/nvhpc/24.5
 cmd=(
     srun
