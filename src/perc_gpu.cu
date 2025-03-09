@@ -18,9 +18,8 @@
 #include <cuda_runtime.h>
 
 // Configuration constants
-constexpr int BLOCK_SIZE = 32;  // Increased from 16 to 32 for better occupancy
+constexpr int BLOCK_SIZE = 16;  // Back to 16 for safer memory access
 constexpr int printfreq = 100;
-constexpr int SHARED_MEM_PADDING = 1;  // Padding to avoid bank conflicts
 
 // CUDA error checking macro
 #define CHECK_CUDA_ERROR(val) check_cuda( (val), #val, __FILE__, __LINE__ )
@@ -33,41 +32,24 @@ void check_cuda(T result, char const *const func, const char *const file, int co
     }
 }
 
-// Optimized CUDA kernel using shared memory and improved memory access patterns
+// Optimized CUDA kernel using shared memory
 __global__ void percolate_kernel(int M, int N, const int* __restrict__ state, 
                                 int* __restrict__ next, int* changes) {
     extern __shared__ int shared_state[];
     
-    // Calculate global and local indices
+    // Calculate global indices
+    const int i = blockIdx.y * blockDim.y + threadIdx.y;
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
-    const int bx = blockIdx.x * (blockDim.x - 2);  // Overlap blocks by 1 cell
-    const int by = blockIdx.y * (blockDim.y - 2);
-    const int i = by + ty;
-    const int j = bx + tx;
     
-    // Shared memory dimensions including halo
-    const int smem_pitch = BLOCK_SIZE + SHARED_MEM_PADDING;
-    const int smem_idx = ty * smem_pitch + tx;
+    // Shared memory index
+    const int smem_idx = ty * blockDim.x + tx;
     
-    // Load data into shared memory including halo regions
+    // Load data into shared memory
     if (i <= M && j <= N) {
         const int global_idx = i * (N + 2) + j;
         shared_state[smem_idx] = state[global_idx];
-        
-        // Load halo regions if thread is on block boundary
-        if (tx == 0 && j > 0) {
-            shared_state[smem_idx - 1] = state[global_idx - 1];
-        }
-        if (tx == blockDim.x - 1 && j < N) {
-            shared_state[smem_idx + 1] = state[global_idx + 1];
-        }
-        if (ty == 0 && i > 0) {
-            shared_state[smem_idx - smem_pitch] = state[global_idx - (N + 2)];
-        }
-        if (ty == blockDim.y - 1 && i < M) {
-            shared_state[smem_idx + smem_pitch] = state[global_idx + (N + 2)];
-        }
     }
     
     __syncthreads();
@@ -78,21 +60,17 @@ __global__ void percolate_kernel(int M, int N, const int* __restrict__ state,
         int newval = oldval;
         
         if (oldval != 0) {
-            // Use shared memory for neighbor access
-            newval = max(newval, shared_state[smem_idx - smem_pitch]);  // Up
-            newval = max(newval, shared_state[smem_idx + smem_pitch]);  // Down
-            newval = max(newval, shared_state[smem_idx - 1]);          // Left
-            newval = max(newval, shared_state[smem_idx + 1]);          // Right
+            // Check neighbors from global memory (safer but slower)
+            const int global_idx = i * (N + 2) + j;
+            newval = max(newval, state[global_idx - (N + 2)]);  // Up
+            newval = max(newval, state[global_idx + (N + 2)]);  // Down
+            newval = max(newval, state[global_idx - 1]);        // Left
+            newval = max(newval, state[global_idx + 1]);        // Right
             
-            // Write result to global memory
-            next[i * (N + 2) + j] = newval;
+            next[global_idx] = newval;
             
-            // Use warp-level primitives to reduce atomic operations
-            unsigned mask = __ballot_sync(0xffffffff, newval != oldval);
-            if (mask) {
-                if (threadIdx.x == 0) {
-                    atomicAdd(changes, __popc(mask));
-                }
+            if (newval != oldval) {
+                atomicAdd(changes, 1);
             }
         } else {
             next[i * (N + 2) + j] = 0;
@@ -109,10 +87,6 @@ struct GpuRunner::Impl {
     int* d_tmp;      // Device memory
     int* d_changes;  // Device memory for counting changes
     int* h_changes;  // Host memory for changes (pinned)
-    
-    // CUDA streams for async operations
-    cudaStream_t compute_stream;
-    cudaStream_t transfer_stream;
     
     // CUDA events for timing
     cudaEvent_t start_event;
@@ -134,10 +108,6 @@ struct GpuRunner::Impl {
         CHECK_CUDA_ERROR(cudaMalloc(&d_tmp, size() * sizeof(int)));
         CHECK_CUDA_ERROR(cudaMalloc(&d_changes, sizeof(int)));
         
-        // Create CUDA streams
-        CHECK_CUDA_ERROR(cudaStreamCreate(&compute_stream));
-        CHECK_CUDA_ERROR(cudaStreamCreate(&transfer_stream));
-        
         // Create timing events
         CHECK_CUDA_ERROR(cudaEventCreate(&start_event));
         CHECK_CUDA_ERROR(cudaEventCreate(&stop_event));
@@ -156,9 +126,7 @@ struct GpuRunner::Impl {
         cudaFree(d_tmp);
         cudaFree(d_changes);
         
-        // Destroy streams and events
-        cudaStreamDestroy(compute_stream);
-        cudaStreamDestroy(transfer_stream);
+        // Destroy events
         cudaEventDestroy(start_event);
         cudaEventDestroy(stop_event);
         cudaEventDestroy(transfer_start);
@@ -177,17 +145,16 @@ GpuRunner::~GpuRunner() = default;
 
 void GpuRunner::copy_in(int const* source) {
     // Record transfer start time
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_start, m_impl->transfer_stream));
+    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_start));
     
-    // Copy to pinned memory then to device asynchronously
+    // Copy to pinned memory then to device
     std::copy(source, source + m_impl->size(), m_impl->state);
-    CHECK_CUDA_ERROR(cudaMemcpyAsync(m_impl->d_state, m_impl->state,
-                                    m_impl->size() * sizeof(int),
-                                    cudaMemcpyHostToDevice,
-                                    m_impl->transfer_stream));
+    CHECK_CUDA_ERROR(cudaMemcpy(m_impl->d_state, m_impl->state,
+                               m_impl->size() * sizeof(int),
+                               cudaMemcpyHostToDevice));
     
     // Record transfer end time
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_stop, m_impl->transfer_stream));
+    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_stop));
     CHECK_CUDA_ERROR(cudaEventSynchronize(m_impl->transfer_stop));
     CHECK_CUDA_ERROR(cudaEventElapsedTime(&m_impl->transfer_ms,
                                          m_impl->transfer_start,
@@ -196,18 +163,16 @@ void GpuRunner::copy_in(int const* source) {
 
 void GpuRunner::copy_out(int* dest) const {
     // Record transfer start time
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_start, m_impl->transfer_stream));
+    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_start));
     
     // Copy from device to pinned memory then to destination
-    CHECK_CUDA_ERROR(cudaMemcpyAsync(m_impl->state, m_impl->d_state,
-                                    m_impl->size() * sizeof(int),
-                                    cudaMemcpyDeviceToHost,
-                                    m_impl->transfer_stream));
-    CHECK_CUDA_ERROR(cudaStreamSynchronize(m_impl->transfer_stream));
+    CHECK_CUDA_ERROR(cudaMemcpy(m_impl->state, m_impl->d_state,
+                               m_impl->size() * sizeof(int),
+                               cudaMemcpyDeviceToHost));
     std::copy(m_impl->state, m_impl->state + m_impl->size(), dest);
     
     // Record transfer end time
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_stop, m_impl->transfer_stream));
+    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_stop));
     CHECK_CUDA_ERROR(cudaEventSynchronize(m_impl->transfer_stop));
     float transfer_ms;
     CHECK_CUDA_ERROR(cudaEventElapsedTime(&transfer_ms,
@@ -220,14 +185,13 @@ void GpuRunner::run() {
     int const M = m_impl->M;
     int const N = m_impl->N;
     
-    // Calculate optimal grid and block dimensions
+    // Calculate grid and block dimensions
     dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE);
-    dim3 gridDim((N + BLOCK_SIZE - 3) / (BLOCK_SIZE - 2),
-                 (M + BLOCK_SIZE - 3) / (BLOCK_SIZE - 2));
+    dim3 gridDim((N + BLOCK_SIZE - 1) / BLOCK_SIZE,
+                 (M + BLOCK_SIZE - 1) / BLOCK_SIZE);
     
-    // Calculate shared memory size with padding
-    size_t smem_size = (BLOCK_SIZE + SHARED_MEM_PADDING) * 
-                       (BLOCK_SIZE + SHARED_MEM_PADDING) * sizeof(int);
+    // Calculate shared memory size
+    size_t smem_size = BLOCK_SIZE * BLOCK_SIZE * sizeof(int);
 
     int const maxstep = 4 * std::max(M, N);
     int step = 1;
@@ -238,23 +202,21 @@ void GpuRunner::run() {
     int* d_next = m_impl->d_tmp;
     
     // Record kernel start time
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->start_event, m_impl->compute_stream));
+    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->start_event));
 
     while (nchange && step <= maxstep) {
         // Reset change counter
-        CHECK_CUDA_ERROR(cudaMemsetAsync(m_impl->d_changes, 0, sizeof(int),
-                                        m_impl->compute_stream));
+        CHECK_CUDA_ERROR(cudaMemset(m_impl->d_changes, 0, sizeof(int)));
         
-        // Launch kernel with shared memory
-        percolate_kernel<<<gridDim, blockDim, smem_size, m_impl->compute_stream>>>
+        // Launch kernel
+        percolate_kernel<<<gridDim, blockDim, smem_size>>>
             (M, N, d_current, d_next, m_impl->d_changes);
         CHECK_CUDA_ERROR(cudaGetLastError());
         
-        // Get number of changes asynchronously
-        CHECK_CUDA_ERROR(cudaMemcpyAsync(m_impl->h_changes, m_impl->d_changes,
-                                        sizeof(int), cudaMemcpyDeviceToHost,
-                                        m_impl->compute_stream));
-        CHECK_CUDA_ERROR(cudaStreamSynchronize(m_impl->compute_stream));
+        // Get number of changes
+        CHECK_CUDA_ERROR(cudaMemcpy(m_impl->h_changes, m_impl->d_changes,
+                                   sizeof(int), cudaMemcpyDeviceToHost));
+        CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         nchange = *(m_impl->h_changes);
 
         if (step % printfreq == 0) {
@@ -267,7 +229,7 @@ void GpuRunner::run() {
     }
     
     // Record kernel stop time
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->stop_event, m_impl->compute_stream));
+    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->stop_event));
     CHECK_CUDA_ERROR(cudaEventSynchronize(m_impl->stop_event));
     CHECK_CUDA_ERROR(cudaEventElapsedTime(&m_impl->kernel_ms,
                                          m_impl->start_event,
@@ -275,10 +237,9 @@ void GpuRunner::run() {
 
     // Ensure final state is in d_state
     if (d_current != m_impl->d_state) {
-        CHECK_CUDA_ERROR(cudaMemcpyAsync(m_impl->d_state, d_current,
-                                        m_impl->size() * sizeof(int),
-                                        cudaMemcpyDeviceToDevice,
-                                        m_impl->compute_stream));
+        CHECK_CUDA_ERROR(cudaMemcpy(m_impl->d_state, d_current,
+                                   m_impl->size() * sizeof(int),
+                                   cudaMemcpyDeviceToDevice));
     }
     
     // Print timing information
