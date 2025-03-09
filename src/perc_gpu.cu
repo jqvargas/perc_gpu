@@ -18,7 +18,7 @@
 #include <cuda_runtime.h>
 
 // Configuration constants
-constexpr int BLOCK_SIZE = 16;  // Back to 16 for safer memory access
+constexpr int BLOCK_SIZE = 16;  // Keep the original block size
 constexpr int printfreq = 100;
 
 // CUDA error checking macro
@@ -32,29 +32,34 @@ void check_cuda(T result, char const *const func, const char *const file, int co
     }
 }
 
-// Optimized CUDA kernel using shared memory
+// Simple macro for 2D indexing
+#define IDX(i, j, N) ((i)*(N+2) + (j))
+
+// Basic CUDA kernel with minimal optimizations
 __global__ void percolate_kernel(int M, int N, const int* __restrict__ state, 
                                 int* __restrict__ next, int* changes) {
-    // Calculate global indices with boundary check
+    // Calculate indices
     const int i = blockIdx.y * blockDim.y + threadIdx.y;
     const int j = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // Only process interior points (1 to M/N inclusive)
+
+    // Only process interior points
     if (i >= 1 && i <= M && j >= 1 && j <= N) {
-        const int idx = i * (N + 2) + j;
+        const int idx = IDX(i, j, N);
         const int oldval = state[idx];
-        
+
+        // Only process fluid cells
         if (oldval != 0) {
             int newval = oldval;
             
-            // Check neighbors
-            newval = max(newval, state[idx - (N + 2)]);  // Up
-            newval = max(newval, state[idx + (N + 2)]);  // Down
-            newval = max(newval, state[idx - 1]);        // Left
-            newval = max(newval, state[idx + 1]);        // Right
-            
+            // Check neighbors using the macro for consistent indexing
+            newval = max(newval, state[IDX(i-1, j, N)]);  // Up
+            newval = max(newval, state[IDX(i+1, j, N)]);  // Down
+            newval = max(newval, state[IDX(i, j-1, N)]);  // Left
+            newval = max(newval, state[IDX(i, j+1, N)]);  // Right
+
             next[idx] = newval;
             
+            // Only increment counter if value changed
             if (newval != oldval) {
                 atomicAdd(changes, 1);
             }
@@ -67,53 +72,33 @@ __global__ void percolate_kernel(int M, int N, const int* __restrict__ state,
 struct GpuRunner::Impl {
     int M;
     int N;
-    int* state;      // Host memory (pinned)
-    int* tmp;        // Host memory (pinned)
+    int* state;      // Host memory
+    int* tmp;        // Host memory
     int* d_state;    // Device memory
     int* d_tmp;      // Device memory
     int* d_changes;  // Device memory for counting changes
-    int* h_changes;  // Host memory for changes (pinned)
-    
-    // CUDA events for timing
-    cudaEvent_t start_event;
-    cudaEvent_t stop_event;
-    cudaEvent_t transfer_start;
-    cudaEvent_t transfer_stop;
-    
-    float kernel_ms;    // Kernel execution time
-    float transfer_ms;  // Transfer time
+    int* h_changes;  // Host memory for changes
 
-    Impl(int m, int n) : M(m), N(n), kernel_ms(0), transfer_ms(0) {
-        // Allocate pinned memory
-        CHECK_CUDA_ERROR(cudaHostAlloc(&state, size() * sizeof(int), cudaHostAllocDefault));
-        CHECK_CUDA_ERROR(cudaHostAlloc(&tmp, size() * sizeof(int), cudaHostAllocDefault));
-        CHECK_CUDA_ERROR(cudaHostAlloc(&h_changes, sizeof(int), cudaHostAllocDefault));
-        
+    Impl(int m, int n) : M(m), N(n) {
+        // Allocate host memory
+        state = new int[size()];
+        tmp = new int[size()];
+        h_changes = new int;
+
         // Allocate device memory
         CHECK_CUDA_ERROR(cudaMalloc(&d_state, size() * sizeof(int)));
         CHECK_CUDA_ERROR(cudaMalloc(&d_tmp, size() * sizeof(int)));
         CHECK_CUDA_ERROR(cudaMalloc(&d_changes, sizeof(int)));
-        
-        // Create timing events
-        CHECK_CUDA_ERROR(cudaEventCreate(&start_event));
-        CHECK_CUDA_ERROR(cudaEventCreate(&stop_event));
-        CHECK_CUDA_ERROR(cudaEventCreate(&transfer_start));
-        CHECK_CUDA_ERROR(cudaEventCreate(&transfer_stop));
     }
     
     ~Impl() {
-        cudaFreeHost(state);
-        cudaFreeHost(tmp);
-        cudaFreeHost(h_changes);
+        delete[] state;
+        delete[] tmp;
+        delete h_changes;
         
         cudaFree(d_state);
         cudaFree(d_tmp);
         cudaFree(d_changes);
-        
-        cudaEventDestroy(start_event);
-        cudaEventDestroy(stop_event);
-        cudaEventDestroy(transfer_start);
-        cudaEventDestroy(transfer_stop);
     }
 
     int size() const {
@@ -127,47 +112,30 @@ GpuRunner::GpuRunner(int M, int N) : m_impl(std::make_unique<Impl>(M, N)) {
 GpuRunner::~GpuRunner() = default;
 
 void GpuRunner::copy_in(int const* source) {
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_start));
-    
+    // Copy to host memory
     std::copy(source, source + m_impl->size(), m_impl->state);
+    
+    // Copy to device
     CHECK_CUDA_ERROR(cudaMemcpy(m_impl->d_state, m_impl->state,
                                m_impl->size() * sizeof(int),
                                cudaMemcpyHostToDevice));
-    
-    // Also initialize d_tmp with the same data
-    CHECK_CUDA_ERROR(cudaMemcpy(m_impl->d_tmp, m_impl->state,
-                               m_impl->size() * sizeof(int),
-                               cudaMemcpyHostToDevice));
-    
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_stop));
-    CHECK_CUDA_ERROR(cudaEventSynchronize(m_impl->transfer_stop));
-    CHECK_CUDA_ERROR(cudaEventElapsedTime(&m_impl->transfer_ms,
-                                         m_impl->transfer_start,
-                                         m_impl->transfer_stop));
 }
 
 void GpuRunner::copy_out(int* dest) const {
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_start));
-    
+    // Copy from device to host
     CHECK_CUDA_ERROR(cudaMemcpy(m_impl->state, m_impl->d_state,
                                m_impl->size() * sizeof(int),
                                cudaMemcpyDeviceToHost));
-    std::copy(m_impl->state, m_impl->state + m_impl->size(), dest);
     
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->transfer_stop));
-    CHECK_CUDA_ERROR(cudaEventSynchronize(m_impl->transfer_stop));
-    float transfer_ms;
-    CHECK_CUDA_ERROR(cudaEventElapsedTime(&transfer_ms,
-                                         m_impl->transfer_start,
-                                         m_impl->transfer_stop));
-    m_impl->transfer_ms += transfer_ms;
+    // Copy to destination
+    std::copy(m_impl->state, m_impl->state + m_impl->size(), dest);
 }
 
 void GpuRunner::run() {
     int const M = m_impl->M;
     int const N = m_impl->N;
     
-    // Calculate grid dimensions to cover the entire domain
+    // Calculate grid dimensions
     dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE);
     dim3 gridDim((N + BLOCK_SIZE - 1) / BLOCK_SIZE,
                  (M + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -176,10 +144,9 @@ void GpuRunner::run() {
     int step = 1;
     int nchange = 1;
 
+    // Use pointers to device buffers
     int* d_current = m_impl->d_state;
     int* d_next = m_impl->d_tmp;
-    
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->start_event));
 
     while (nchange && step <= maxstep) {
         // Reset change counter
@@ -200,15 +167,10 @@ void GpuRunner::run() {
                    step, nchange);
         }
 
+        // Swap buffers
         std::swap(d_next, d_current);
         step++;
     }
-    
-    CHECK_CUDA_ERROR(cudaEventRecord(m_impl->stop_event));
-    CHECK_CUDA_ERROR(cudaEventSynchronize(m_impl->stop_event));
-    CHECK_CUDA_ERROR(cudaEventElapsedTime(&m_impl->kernel_ms,
-                                         m_impl->start_event,
-                                         m_impl->stop_event));
 
     // Ensure final state is in d_state
     if (d_current != m_impl->d_state) {
@@ -216,9 +178,4 @@ void GpuRunner::run() {
                                    m_impl->size() * sizeof(int),
                                    cudaMemcpyDeviceToDevice));
     }
-    
-    printf("\nPerformance Summary:\n");
-    printf("Kernel execution time: %.3f ms\n", m_impl->kernel_ms);
-    printf("Memory transfer time: %.3f ms\n", m_impl->transfer_ms);
-    printf("Total time: %.3f ms\n", m_impl->kernel_ms + m_impl->transfer_ms);
 }
