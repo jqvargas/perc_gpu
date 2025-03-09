@@ -17,15 +17,22 @@
 #include <vector>
 #include <cuda_runtime.h>
 
-// ¡Optimización para la GPU V100! 
-// Tío, la V100 es una bestia con 80 SMs y puede manejar hasta 2048 threads por SM
-// Usamos bloques de 32x32 = 1024 threads que es lo más guay para esta GPU
-// [GPU ADAPTATION] - Increased from CPU's serial processing to 32x32 thread blocks
-constexpr int BLOCK_SIZE = 32;  // Tamaño del bloque (32x32 threads, ¡a tope!)
+
+
+
+
+
+// Optimization for the GPU V100
+//  la V100 es una bestia con 80 SMs y 2048 threads por SM
+// bloques de 32x32 = 1024 threads so we maximize the occupancy in the gpu
+// [this was the main gpu adaptation as i Increased from CPU's serial processing to 32x32 thread blocks
+constexpr int BLOCK_SIZE = 32;  // Tamaño del bloque (32x32 threads to max out occupancy
 constexpr int printfreq = 100;
 
 // Macro para checkear errores de CUDA
-// Porsi las moscas, mejor prevenir que curar ;)
+// Porsi las moscas, mejor prevenir que curar ;})
+
+//ERRROR CHECKS::
 #define CHECK_CUDA_ERROR(val) check_cuda( (val), #val, __FILE__, __LINE__ )
 template<typename T>
 void check_cuda(T result, char const *const func, const char *const file, int const line) {
@@ -36,10 +43,22 @@ void check_cuda(T result, char const *const func, const char *const file, int co
     }
 }
 
-// ¡El kernel más chulo de CUDA para la percolación!
+
+
+
+
+
+
+
+// este es el kernel de CUDA principal para la percolación
 // [GPU ADAPTATION] - Converted from CPU's sequential loop to parallel CUDA kernel
 __global__ void percolate_kernel(int M, int N, const int* __restrict__ state, 
                                 int* __restrict__ next, int* changes) {
+
+
+
+
+
     // Calculamos los índices con el nuevo tamaño de bloque
     // ¡Trucazo! Usamos registros para acceso más rápido
     const int tx = threadIdx.x;
@@ -49,6 +68,9 @@ __global__ void percolate_kernel(int M, int N, const int* __restrict__ state,
     const int i = blockIdx.y * blockDim.y + ty + 1;  // fila
     
     if (i <= M && j <= N) {
+
+
+
         // Pre-calculamos el índice y lo guardamos en registro
         // ¡Optimización a tope! 🚀
         const int idx = i * (N + 2) + j;
@@ -81,10 +103,19 @@ __global__ void percolate_kernel(int M, int N, const int* __restrict__ state,
                 atomicAdd(changes, 1);  // ¡Cuenta atómica, que no se nos escape ninguno!
             }
         } else {
+
             next[idx] = 0;
+
+
+
+
         }
     }
 }
+
+
+
+
 
 // Estructura para manejar todo el cotarro de la GPU
 struct GpuRunner::Impl {
@@ -99,7 +130,7 @@ struct GpuRunner::Impl {
     int* d_changes;  // Contador de cambios en la GPU
     int* h_changes;  // Contador de cambios en el host (pinned)
 
-    // Eventos para medir tiempos (¡a cronometrar todo!)
+    // Eventos para medir tiempos (a cronometrar todo....)
     cudaEvent_t start_compute;
     cudaEvent_t stop_compute;
     cudaEvent_t start_h2d;
@@ -107,7 +138,7 @@ struct GpuRunner::Impl {
     cudaEvent_t start_d2h;
     cudaEvent_t stop_d2h;
 
-    // Resultados de tiempos (en milisegundos)
+    // Resultados de tiempos (en milisegundos) Results times!!
     float compute_time;
     float h2d_time;
     float d2h_time;
@@ -253,6 +284,7 @@ void GpuRunner::run() {
     dim3 gridDim((N + BLOCK_SIZE - 1) / BLOCK_SIZE,
                  (M + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
+
     // Print occupancy information
     printf("\nGrid Configuration:\n");
     printf("Block dimensions : %dx%d threads (%d threads per block)\n", 
@@ -262,13 +294,18 @@ void GpuRunner::run() {
            gridDim.x * gridDim.y * BLOCK_SIZE * BLOCK_SIZE);
     printf("Problem size    : %dx%d cells\n", M, N);
 
+
     int const maxstep = 4 * std::max(M, N);
     int step = 1;
+
     int nchange = 1;
+
 
     // Use pointers to device buffers
     int* d_current = m_impl->d_state;
     int* d_next = m_impl->d_tmp;
+
+
 
     // Start timing computation
     CHECK_CUDA_ERROR(cudaEventRecord(m_impl->start_compute, m_impl->compute_stream));
@@ -305,6 +342,7 @@ void GpuRunner::run() {
     m_impl->compute_time += milliseconds;
 
     // Ensure final state is in d_state
+
     if (d_current != m_impl->d_state) {
         CHECK_CUDA_ERROR(cudaMemcpyAsync(m_impl->d_state, d_current,
                                         m_impl->size() * sizeof(int),
@@ -315,4 +353,13 @@ void GpuRunner::run() {
 
     // Print timing statistics
     m_impl->print_timing_stats();
+
+
+
+
+
 }
+
+
+//eND of gpu adptation - optimization iteration n°3
+//DONE and updated to git!""
